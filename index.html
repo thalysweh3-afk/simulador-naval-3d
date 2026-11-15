@@ -1,1 +1,542 @@
 
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Marshall Naval Simulator</title>
+<style>
+*{box-sizing:border-box}
+body{
+ margin:0;overflow:hidden;background:#071827;
+ color:white;font-family:Arial,sans-serif;
+ touch-action:none
+}
+canvas{display:block;width:100%;height:100%}
+#panel{
+ position:absolute;top:12px;left:12px;
+ background:#081c2de8;padding:12px;
+ border:1px solid #42647b;border-radius:10px;
+ pointer-events:none
+}
+#panel strong{font-size:15px}
+#panel small{display:block;color:#a9c7d9;margin-top:5px}
+#status{
+ position:absolute;top:91px;left:12px;
+ background:#081c2de8;padding:8px 11px;
+ border-radius:8px;font-size:12px
+}
+#controls{
+ position:absolute;bottom:15px;left:0;width:100%;
+ display:flex;justify-content:center;gap:7px;
+ padding:0 8px;flex-wrap:wrap
+}
+button{
+ background:#123650;color:white;
+ border:1px solid #54809b;border-radius:9px;
+ padding:12px 13px;font-size:13px;
+}
+button.active{background:#a43c32}
+#hint{
+ position:absolute;bottom:75px;left:12px;
+ font-size:11px;color:#d0e6ef;
+ pointer-events:none
+}
+</style>
+</head>
+<body>
+
+<div id="panel">
+ <strong>⚓ MARSHALL NAVAL SIMULATOR</strong>
+ <small>PHYSICS ENGINE 0.1</small>
+ <small>SIMULAÇÃO NAVAL 2D</small>
+</div>
+
+<div id="status">Inicializando motor físico...</div>
+
+<div id="hint">
+ Ative DANOS e toque no casco para romper conexões.
+</div>
+
+<div id="controls">
+ <button id="pause">Ⅱ PAUSAR</button>
+ <button id="damage">🔨 DANOS</button>
+ <button id="waves">🌊 ONDAS</button>
+ <button id="reset">⟳ REINICIAR</button>
+</div>
+
+<canvas id="screen"></canvas>
+
+<script>
+"use strict";
+
+// =====================================
+// 1. CONFIGURAÇÃO
+// =====================================
+
+const canvas=document.getElementById("screen");
+const ctx=canvas.getContext("2d");
+
+let W=0,H=0,DPR=1;
+let waterLevel=0;
+let paused=false;
+let damageMode=false;
+let wavePower=1;
+let time=0;
+
+const gravity=0.16;
+const damping=0.995;
+const iterations=7;
+
+let particles=[];
+let springs=[];
+let damageMarks=[];
+
+function resize(){
+ W=window.innerWidth;
+ H=window.innerHeight;
+ DPR=Math.min(window.devicePixelRatio||1,1.5);
+
+ canvas.width=W*DPR;
+ canvas.height=H*DPR;
+ ctx.setTransform(DPR,0,0,DPR,0,0);
+
+ waterLevel=H*0.66;
+}
+
+window.addEventListener("resize",resize);
+resize();
+
+// =====================================
+// 2. SISTEMA DE PARTÍCULAS
+// =====================================
+
+class Particle{
+ constructor(x,y){
+  this.x=x;
+  this.y=y;
+  this.oldX=x;
+  this.oldY=y;
+  this.mass=1;
+  this.pinned=false;
+ }
+ update(){
+  if(this.pinned)return;
+
+  const vx=(this.x-this.oldX)*damping;
+  const vy=(this.y-this.oldY)*damping;
+
+  this.oldX=this.x;
+  this.oldY=this.y;
+
+  this.x+=vx;
+  this.y+=vy+gravity;
+ }
+}
+
+// =====================================
+// 3. CONEXÕES ESTRUTURAIS
+// =====================================
+
+class Spring{
+ constructor(a,b,strength=1){
+  this.a=a;
+  this.b=b;
+
+  const dx=b.x-a.x;
+  const dy=b.y-a.y;
+
+  this.length=Math.hypot(dx,dy);
+  this.strength=strength;
+  this.broken=false;
+ }
+ solve(){
+  if(this.broken)return;
+
+  const dx=this.b.x-this.a.x;
+  const dy=this.b.y-this.a.y;
+  const distance=Math.hypot(dx,dy);
+
+  if(distance<0.001)return;
+
+  const difference=
+   (distance-this.length)/distance*this.strength;
+
+  const ox=dx*difference*0.5;
+  const oy=dy*difference*0.5;
+
+  if(!this.a.pinned){
+   this.a.x+=ox;
+   this.a.y+=oy;
+  }
+
+  if(!this.b.pinned){
+   this.b.x-=ox;
+   this.b.y-=oy;
+  }
+ }
+}
+
+// =====================================
+// 4. CONSTRUÇÃO DO NAVIO
+// =====================================
+
+let hull=[];
+
+function createShip(){
+
+ particles=[];
+ springs=[];
+ damageMarks=[];
+ hull=[];
+
+ const length=Math.min(W*0.78,520);
+ const height=length*0.18;
+
+ const cx=W/2;
+ const top=waterLevel-height*0.78;
+
+ // Formato lateral do casco
+ const shape=[
+  [-0.50,0.00],
+  [-0.30,0.00],
+  [-0.05,0.00],
+  [ 0.20,0.00],
+  [ 0.42,0.05],
+  [ 0.50,0.35],
+  [ 0.39,0.90],
+  [ 0.15,1.00],
+  [-0.18,1.00],
+  [-0.42,0.85],
+  [-0.50,0.55]
+ ];
+
+ for(const p of shape){
+  const node=new Particle(
+   cx+p[0]*length,
+   top+p[1]*height
+  );
+
+  particles.push(node);
+  hull.push(node);
+ }
+
+ // Ligações externas do casco
+ for(let i=0;i<hull.length;i++){
+  const next=(i+1)%hull.length;
+  springs.push(new Spring(hull[i],hull[next],1));
+ }
+
+ // Reforços internos
+ const pairs=[
+  [0,3],[0,8],[1,7],[2,8],
+  [3,7],[4,7],[4,8],[5,7],
+  [6,8],[7,10],[8,10],[1,9]
+ ];
+
+ for(const pair of pairs){
+  springs.push(new Spring(
+   hull[pair[0]],hull[pair[1]],0.85
+  ));
+ }
+}
+
+// =====================================
+// 5. ONDAS E FLUTUAÇÃO
+// =====================================
+
+function waterHeight(x){
+ return waterLevel+
+  Math.sin(x*0.018+time*1.4)*5*wavePower+
+  Math.sin(x*0.035-time)*2.5*wavePower;
+}
+
+function applyBuoyancy(){
+
+ for(const p of particles){
+
+  if(p.pinned)continue;
+
+  const surface=waterHeight(p.x);
+
+  if(p.y>surface){
+   const depth=p.y-surface;
+
+   // Empuxo aproximado
+   const buoyancy=Math.min(depth*0.035,0.85);
+
+   p.y-=buoyancy;
+  }
+ }
+}
+
+// =====================================
+// 6. MOTOR DE FÍSICA
+// =====================================
+
+function physicsStep(){
+
+ for(const p of particles){
+  p.update();
+ }
+
+ applyBuoyancy();
+
+ for(let i=0;i<iterations;i++){
+
+  for(const s of springs){
+   s.solve();
+  }
+
+  // Limite inferior do mundo
+  for(const p of particles){
+   if(p.y>H+100){
+    p.y=H+100;
+   }
+  }
+ }
+}
+
+// =====================================
+// 7. DESENHO DO OCEANO
+// =====================================
+
+function drawOcean(){
+
+ ctx.beginPath();
+ ctx.moveTo(0,H);
+ ctx.lineTo(0,waterHeight(0));
+
+ for(let x=0;x<=W;x+=4){
+  ctx.lineTo(x,waterHeight(x));
+ }
+
+ ctx.lineTo(W,H);
+ ctx.closePath();
+
+ const gradient=ctx.createLinearGradient(
+  0,waterLevel,0,H
+ );
+
+ gradient.addColorStop(0,"#168db4");
+ gradient.addColorStop(1,"#032b4c");
+
+ ctx.fillStyle=gradient;
+ ctx.fill();
+
+ ctx.beginPath();
+
+ for(let x=0;x<=W;x+=4){
+  const y=waterHeight(x);
+
+  if(x===0)ctx.moveTo(x,y);
+  else ctx.lineTo(x,y);
+ }
+
+ ctx.strokeStyle="#7ddcf3";
+ ctx.lineWidth=2;
+ ctx.stroke();
+}
+
+// =====================================
+// 8. DESENHO DO NAVIO
+// =====================================
+
+function drawShip(){
+
+ if(hull.length===0)return;
+
+ // Casco
+ ctx.beginPath();
+
+ hull.forEach((p,i)=>{
+  if(i===0)ctx.moveTo(p.x,p.y);
+  else ctx.lineTo(p.x,p.y);
+ });
+
+ ctx.closePath();
+
+ ctx.fillStyle="#56616a";
+ ctx.fill();
+
+ ctx.strokeStyle="#c2cbd0";
+ ctx.lineWidth=2;
+ ctx.stroke();
+
+ // Conexões estruturais
+ for(const s of springs){
+
+  if(s.broken)continue;
+
+  ctx.beginPath();
+  ctx.moveTo(s.a.x,s.a.y);
+  ctx.lineTo(s.b.x,s.b.y);
+
+  ctx.strokeStyle="#8b969d";
+  ctx.lineWidth=1;
+  ctx.stroke();
+ }
+
+ // Convés e superestrutura
+ const cx=hull.reduce((v,p)=>v+p.x,0)/hull.length;
+ const topY=Math.min(...hull.map(p=>p.y));
+
+ ctx.fillStyle="#8a969c";
+ ctx.fillRect(cx-48,topY-34,95,32);
+
+ ctx.fillStyle="#c0c5c4";
+ ctx.fillRect(cx-29,topY-59,55,25);
+
+ // Torre de comando
+ ctx.fillStyle="#303e48";
+ ctx.fillRect(cx-18,topY-78,36,19);
+
+ // Chaminé
+ ctx.fillStyle="#303b43";
+ ctx.fillRect(cx+30,topY-75,15,39);
+
+ // Canhões
+ ctx.fillStyle="#252d34";
+
+ for(const x of [cx-100,cx+105]){
+  ctx.beginPath();
+  ctx.arc(x,topY-2,10,0,Math.PI*2);
+  ctx.fill();
+
+  ctx.fillRect(x-3,topY-15,6,18);
+ }
+
+ // Danos
+ for(const mark of damageMarks){
+  ctx.beginPath();
+  ctx.moveTo(mark.x-7,mark.y-7);
+  ctx.lineTo(mark.x+7,mark.y+7);
+  ctx.moveTo(mark.x+7,mark.y-7);
+  ctx.lineTo(mark.x-7,mark.y+7);
+  ctx.strokeStyle="#ff553e";
+  ctx.lineWidth=3;
+  ctx.stroke();
+ }
+}
+
+// =====================================
+// 9. FERRAMENTA DE DANOS
+// =====================================
+
+function damageShip(x,y){
+
+ let nearest=null;
+ let distance=Infinity;
+
+ for(const p of hull){
+  const d=Math.hypot(p.x-x,p.y-y);
+
+  if(d<distance){
+   distance=d;
+   nearest=p;
+  }
+ }
+
+ if(!nearest||distance>55)return;
+
+ let broken=0;
+
+ for(const s of springs){
+
+  if((s.a===nearest||s.b===nearest)&&!s.broken){
+   s.broken=true;
+   broken++;
+  }
+ }
+
+ if(broken>0){
+  damageMarks.push({x:nearest.x,y:nearest.y});
+
+  document.getElementById("status").textContent=
+   "Danos estruturais: "+broken+" conexões rompidas";
+ }
+}
+
+canvas.addEventListener("pointerdown",e=>{
+ if(damageMode){
+  damageShip(e.clientX,e.clientY);
+ }
+});
+
+// =====================================
+// 10. CONTROLES
+// =====================================
+
+document.getElementById("pause").onclick=()=>{
+ paused=!paused;
+
+ document.getElementById("pause").textContent=
+  paused?"▶ CONTINUAR":"Ⅱ PAUSAR";
+};
+
+document.getElementById("damage").onclick=()=>{
+ damageMode=!damageMode;
+
+ document.getElementById("damage").classList.toggle(
+  "active",damageMode
+ );
+
+ document.getElementById("hint").textContent=
+  damageMode?
+  "Toque no casco para romper conexões.":
+  "Simulação naval em andamento.";
+};
+
+document.getElementById("waves").onclick=()=>{
+ wavePower=wavePower===1?2.5:1;
+};
+
+document.getElementById("reset").onclick=()=>{
+ time=0;
+ createShip();
+ document.getElementById("status").textContent=
+  "Navio reiniciado | Motor operacional";
+};
+
+// =====================================
+// 11. CICLO PRINCIPAL
+// =====================================
+
+function render(){
+
+ ctx.clearRect(0,0,W,H);
+
+ // Céu
+ const sky=ctx.createLinearGradient(0,0,0,H);
+ sky.addColorStop(0,"#83b7d1");
+ sky.addColorStop(1,"#d2e3e8");
+
+ ctx.fillStyle=sky;
+ ctx.fillRect(0,0,W,H);
+
+ drawOcean();
+ drawShip();
+
+ if(!paused){
+  time+=0.016;
+  physicsStep();
+ }
+
+ requestAnimationFrame(render);
+}
+
+// =====================================
+// 12. INICIALIZAÇÃO
+// =====================================
+
+createShip();
+
+document.getElementById("status").textContent=
+ "Motor físico iniciado | Partículas: "+particles.length;
+
+render();
+
+</script>
+</body>
+</html>
+
